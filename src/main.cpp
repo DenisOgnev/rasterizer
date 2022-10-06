@@ -10,6 +10,7 @@
 #include <thread>
 #include <mutex>
 #include <condition_variable>
+#include <cmath>
 
 
 const std::string WINDOW_NAME = "Rasterizer";
@@ -28,8 +29,8 @@ struct Model
 const Model cube {
     "Cube", 
     {
-        { 1,  1,  1 }, {-1,  1,  1 }, {-1, -1,  1 }, { 1, -1,  1 },
-        { 1,  1, -1 }, {-1,  1, -1 }, {-1, -1, -1 }, { 1, -1, -1 }
+        { 1.0f,  1.0f,  1.0f }, {-1.0f,  1.0f,  1.0f }, {-1.0f, -1.0f,  1.0f }, { 1.0f, -1.0f,  1.0f },
+        { 1.0f,  1.0f, -1.0f }, {-1.0f,  1.0f, -1.0f }, {-1.0f, -1.0f, -1.0f }, { 1.0f, -1.0f, -1.0f }
     },
     {
         {{0, 1, 2}, sf::Color::Blue},
@@ -55,17 +56,19 @@ const Model cube {
 
 struct ModelTransform
 {
-    glm::vec3 scale;
-    glm::mat3 rotate;
-    glm::vec3 translate;
+    glm::mat4 scale;
+    glm::mat4 rotate;
+    glm::mat4 translate;
+    glm::mat4 transform;
 
-    ModelTransform() { scale = glm::vec3(0.0f); rotate = glm::mat3(0.0f); translate = glm::vec3(0.0f); }
+    ModelTransform() { scale = glm::mat4(0.0f); rotate = glm::mat4(0.0f); translate = glm::mat4(0.0f); }
 
     ModelTransform(glm::vec3 _scale, glm::vec3 _rotate, float _angle, glm::vec3 _translate)
     {
-        scale = _scale;
-        rotate = glm::mat3(glm::rotate(glm::radians(_angle), _rotate));
-        translate = _translate;
+        scale = glm::scale(_scale);
+        rotate = glm::rotate(glm::radians(_angle), _rotate);
+        translate = glm::translate(_translate);
+        transform = translate * rotate * scale;
     }
 };
 
@@ -74,23 +77,24 @@ struct ModelInstance
 {
     Model model;
     ModelTransform transform;
+    std::vector<glm::vec4> vertices;
 
     ModelInstance(Model _model, glm::vec3 _scale, glm::vec3 _rotate, float _angle, glm::vec3 _translate) : model(_model)
     {
         transform = ModelTransform(_scale, _rotate, _angle, _translate);
+        update_vertices();
     }
 
 
-    std::vector<glm::vec3> get_vertices() const
+    void update_vertices()
     {
-        std::vector<glm::vec3> vertices = model.vertices;
-        for (auto &vertex : vertices)
+        for (auto &vertex : model.vertices)
         {
-            vertex = vertex * transform.scale;
-            vertex = vertex * transform.rotate;
-            vertex += transform.translate;
+            glm::vec4 result_vertex = glm::vec4(vertex, 1.0f);
+            result_vertex = transform.transform * result_vertex;
+
+            vertices.push_back(result_vertex);
         }
-        return vertices;
     }
 };
 
@@ -98,6 +102,29 @@ struct ModelInstance
 struct Scene
 {
     std::vector<ModelInstance> models;
+};
+
+
+class Camera
+{
+public:
+    glm::vec3 position;
+    glm::vec3 rotate;
+    float angle;
+    glm::mat4 transform;
+
+    Camera(glm::vec3 _position, glm::vec3 _rotate, float _angle) : position(_position), rotate(_rotate), angle(_angle)
+    {
+        update_transform();
+    }
+
+    void update_transform()
+    {
+        glm::mat4 camera_rotate = glm::inverse(glm::rotate(glm::radians(angle), rotate));
+        glm::mat4 camera_translate = glm::translate(position);
+        
+        transform = camera_translate * camera_rotate;
+    }
 };
 
 
@@ -128,6 +155,10 @@ public:
     RaytracerApp(std::string window_name, int32_t width, int32_t height) : WINDOW_NAME(window_name), WIDTH(width), HEIGHT(height), WINDOW_SIZE(sf::Vector2u(WIDTH, HEIGHT)), window(sf::RenderWindow(sf::VideoMode(WINDOW_SIZE), WINDOW_NAME)) 
     {
         pixels = std::make_unique<uint8_t[]>(WIDTH * HEIGHT * 4);
+        depth_buffer = std::make_unique<float[]>(WIDTH * HEIGHT);
+
+        clear_depth_buffer();
+        
         if (!texture.create(WINDOW_SIZE))
             throw std::runtime_error("Failed to create texture.");
         sprite = sf::Sprite(texture);
@@ -152,39 +183,40 @@ private:
     std::unique_ptr<uint8_t[]> pixels;
     sf::Texture texture;
     sf::Sprite sprite;
+    
+    std::unique_ptr<float[]> depth_buffer;
 
     sf::Clock clock;
 
     glm::vec3 camera_pos = glm::vec3(0.0f, 0.0f, 1.0f);
     glm::vec3 camera_rotation = glm::vec3(0.0f, 1.0f, 0.0f);
-    float camera_angle = 10.0f;
+    float camera_angle = 0.0f;
+
+    Camera camera {camera_pos, camera_rotation, camera_angle};
 
     float d = 1.0f;
     int32_t viewport_width = 1;
     int32_t viewport_height = 1;
 
     Scene scene {};
-  
+
 
     void main_loop()
     {
         while (window.isOpen())
         {
-            // float current_time = clock.restart().asSeconds();
-            // float fps = 1.0f / (current_time);
+            float current_time = clock.restart().asSeconds();
+            float fps = 1.0f / (current_time);
 
-            // std::cout << "frametime: " << current_time << ", fps: " << fps << "\n";
+            std::cout << "frametime: " << current_time << ", fps: " << fps << "\n";
 
             fill(sf::Color::Black);
-            // std::vector<glm::vec2> points = {{0, 100}, {-100, 0}, {0, 0}};
-            // std::vector<float> brightness = {1.0f, 0.0f, 1.0f};
-
-            // draw_shaded_filled_triangle(points, brightness, sf::Color::Blue);
-            // draw_filled_triangle(points, sf::Color::Blue);
 
             render_scene();
             
             texture.update(pixels.get());
+
+            clear_depth_buffer();
             
 
             sf::Event event;
@@ -207,21 +239,8 @@ private:
         }
     }
 
-
-    void put_pixel_start_from_zero(int32_t x, int32_t y, const sf::Color &color)
-    {
-        if (x < 0 || y < 0 || x >= WIDTH || y >= HEIGHT)
-        {
-            throw std::runtime_error("Failed to put pixel.");
-        }
-        pixels[y * (WIDTH * 4) + (x * 4)] = color.r;
-        pixels[y * (WIDTH * 4) + (x * 4) + 1] = color.g;
-        pixels[y * (WIDTH * 4) + (x * 4) + 2] = color.b;
-        pixels[y * (WIDTH * 4) + (x * 4) + 3] = 255;
-    }
-
     
-    void put_pixel(int32_t x, int32_t y, const sf::Color &color)
+    void put_pixel(int32_t x, int32_t y, float depth, const sf::Color &color)
     {
         if (x > (WIDTH - 1) / 2 || x < -WIDTH / 2 || y > (HEIGHT - 1) / 2 || y < -HEIGHT / 2)
         {
@@ -230,11 +249,25 @@ private:
         }
         uint32_t fixed_x = WIDTH / 2 + x;
         uint32_t fixed_y = (HEIGHT + 1) / 2 - (y + 1);
-        
-        pixels[fixed_y * (WIDTH * 4) + (fixed_x * 4)] = color.r;
-        pixels[fixed_y * (WIDTH * 4) + (fixed_x * 4) + 1] = color.g;
-        pixels[fixed_y * (WIDTH * 4) + (fixed_x * 4) + 2] = color.b;
-        pixels[fixed_y * (WIDTH * 4) + (fixed_x * 4) + 3] = 255;
+
+        if (depth_buffer[fixed_y * WIDTH + fixed_x] < depth)
+        {
+            pixels[fixed_y * (WIDTH * 4) + (fixed_x * 4)] = color.r;
+            pixels[fixed_y * (WIDTH * 4) + (fixed_x * 4) + 1] = color.g;
+            pixels[fixed_y * (WIDTH * 4) + (fixed_x * 4) + 2] = color.b;
+            pixels[fixed_y * (WIDTH * 4) + (fixed_x * 4) + 3] = 255;
+
+            depth_buffer[fixed_y * WIDTH + fixed_x] = depth;
+        }
+    }
+
+
+    void clear_depth_buffer()
+    {
+        for (int32_t i = 0; i < WIDTH * HEIGHT; i++)
+        {
+            depth_buffer[i] = 0.0f;
+        }
     }
 
 
@@ -264,7 +297,7 @@ private:
     }
 
 
-    void draw_line(const glm::vec2 &point0, const glm::vec2 &point1, const sf::Color &color)
+    void draw_line_brezenham(const glm::vec2 &point0, const glm::vec2 &point1, float d0, float d1, const sf::Color &color)
     {
         int32_t x0 = static_cast<int32_t>(point0.x);
         int32_t y0 = static_cast<int32_t>(point0.y);
@@ -284,6 +317,7 @@ private:
         {
             std::swap(x0, x1);
             std::swap(y0, y1);
+            std::swap(d0, d1);
         }
         int32_t error = 0;
         int32_t delta_error = delta_y + 1;
@@ -295,15 +329,19 @@ private:
         if (dir_y < 0)
             dir_y = -1;
 
+        std::vector<glm::vec2> depth = interpolate(d0, static_cast<float>(x0), d1, static_cast<float>(x1));
+        std::vector<glm::vec2> points = interpolate(static_cast<float>(y0), static_cast<float>(x0), static_cast<float>(y1), static_cast<float>(x1));
+
+        int32_t i = 0;
         for (int32_t x = x0; x <= x1; x++)
         {
             if (steep)
             {
-                put_pixel(y, x, color);
+                put_pixel(y, x, depth[i].x, color);
             }
             else
             {
-                put_pixel(x, y, color);
+                put_pixel(x, y, depth[i].x, color);
             }
 
             error += delta_error;
@@ -312,71 +350,56 @@ private:
                 y += dir_y;
                 error -= (delta_x + 1);
             }
+            i++;
         }
     }
 
 
-    std::vector<glm::vec2> get_line_points(const glm::vec2 &point0, const glm::vec2 &point1)
+    void draw_line(const glm::vec2 &point0, const glm::vec2 &point1, float d0, float d1, const sf::Color &color)
     {
-        int32_t x0 = static_cast<int32_t>(point0.x);
-        int32_t y0 = static_cast<int32_t>(point0.y);
-        int32_t x1 = static_cast<int32_t>(point1.x);
-        int32_t y1 = static_cast<int32_t>(point1.y);
-        bool steep = false;
-        int32_t delta_x = std::abs(x1 - x0);
-        int32_t delta_y = std::abs(y1 - y0);
-        if (delta_y > delta_x)
-        {
-            std::swap(x0, y0);
-            std::swap(x1, y1);
-            std::swap(delta_x, delta_y);
-            steep = true;
-        }
-        if (x0 > x1)
-        {
-            std::swap(x0, x1);
-            std::swap(y0, y1);
-        }
-        int32_t error = 0;
-        int32_t delta_error = delta_y + 1;
-
-        int32_t y = y0;
-        int32_t dir_y = y1 - y0;
-        if (dir_y > 0)
-            dir_y = 1;
-        if (dir_y < 0)
-            dir_y = -1;
-
-        std::vector<glm::vec2> result_vector;
+        float x0 = point0.x;
+        float y0 = point0.y;
+        float x1 = point1.x;
+        float y1 = point1.y;
         
-        for (int32_t x = x0; x <= x1; x++)
+        float delta_x = std::abs(x1 - x0);
+        float delta_y = std::abs(y1 - y0);
+        bool steep = false;
+        if (delta_y > delta_x)
         {
-            if (steep)
-            {
-                result_vector.push_back(glm::vec2(y, x));
-            }
-            else
-            {
-                result_vector.push_back(glm::vec2(x, y));
-            }
-
-            error += delta_error;
-            if (error >= (delta_x + 1))
-            {
-                y += dir_y;
-                error -= (delta_x + 1);
-            }
+            std::swap(x0, y0);
+            std::swap(x1, y1);
+            std::swap(delta_x, delta_y);
+            steep = true;
         }
 
-        return result_vector;
+    
+        if (x0 > x1)
+        {
+            std::swap(x0, x1);
+            std::swap(y0, y1);
+            std::swap(d0, d1);
+        }
+
+        std::vector<glm::vec2> depth = interpolate(d0, x0, d1, x1);
+        std::vector<glm::vec2> points = interpolate(y0, x0, y1, x1);
+
+
+        for (int32_t i = 0; i < points.size(); i++)
+        {
+            if (steep)
+                put_pixel(static_cast<int32_t>(points[i].x), static_cast<int32_t>(points[i].y), depth[i].x, color);
+            else
+                put_pixel(static_cast<int32_t>(points[i].y), static_cast<int32_t>(points[i].x), depth[i].x, color);
+        }
     }
 
 
-    void draw_triangle(const glm::vec2 &point0, const glm::vec2 &point1, const glm::vec2 &point2, const sf::Color &color)
+    void draw_triangle(const glm::vec2 &point0, const glm::vec2 &point1, const glm::vec2 &point2, float d0, float d1, float d2, const sf::Color &color)
     {
-        draw_line(point0, point1, color);
-        draw_line(point1, point2, color);
-        draw_line(point2, point0, color);
+        draw_line(point0, point1, d0, d1, color);
+        draw_line(point1, point2, d1, d2, color);
+        draw_line(point2, point0, d2, d0, color);
     }
 
 
@@ -393,16 +416,10 @@ private:
             return result;
         }
 
-        float coef = std::abs((x1 - x0) / (y1 - y0));
+        float coef = (x1 - x0) / (y1 - y0);
 
         float x = x0;
-
-        if (x0 > x1) coef = -coef;
-        int32_t y_add = 1;
-        if (y0 > y1)
-        {
-            y_add = -1;
-        }
+       
         int32_t y_start = static_cast<int32_t>(y0);
         int32_t y_end = static_cast<int32_t>(y1);
         
@@ -416,17 +433,40 @@ private:
     }
 
 
-    void draw_filled_triangle(std::vector<glm::vec2> triangle, const sf::Color &color)
+    void draw_filled_triangle(const std::vector<glm::vec2> &triangle, const std::vector<float> &depth, const sf::Color &color)
     {
         if (triangle.size() != 3)
         {
             throw "Wrong size of triangle";
         }
-        std::sort(triangle.begin(), triangle.end(), [](const glm::vec2 &P1, const glm::vec2 &P2) -> bool { return P1.y < P2.y; });
+        if (depth.size() != 3)
+        {
+            throw "Wrong size of depth buffer";
+        }
         
         glm::vec2 v0 = triangle[0];
         glm::vec2 v1 = triangle[1];
         glm::vec2 v2 = triangle[2];
+
+        float d0 = depth[0];
+        float d1 = depth[1];
+        float d2 = depth[2];
+
+        if (v1.y < v0.y)
+        { 
+            std::swap(v1, v0);
+            std::swap(d1, d0);
+        }
+        if (v2.y < v0.y)
+        {
+            std::swap(v2, v0);
+            std::swap(d2, d0);
+        }
+        if (v2.y < v1.y)
+        {
+            std::swap(v2, v1);
+            std::swap(d2, d1);
+        }
         
         std::vector<glm::vec2> x01 = interpolate(v0.x, v0.y, v1.x, v1.y);
         x01.pop_back();
@@ -435,25 +475,34 @@ private:
             
         std::vector<glm::vec2> x012 = x01;
         x012.insert(x012.end(), x12.begin(), x12.end());
+
+        std::vector<glm::vec2> d01 = interpolate(d0, v0.y, d1, v1.y);
+        d01.pop_back();
+        std::vector<glm::vec2> d12 = interpolate(d1, v1.y, d2, v2.y);
+        std::vector<glm::vec2> d02 = interpolate(d0, v0.y, d2, v2.y);
+            
+        std::vector<glm::vec2> d012 = d01;
+        d012.insert(d012.end(), d12.begin(), d12.end());
                         
         for (int32_t i = 0; i < x02.size(); i++)
         {
-            draw_line(x02[i], x012[i], color);
+            draw_line(x02[i], x012[i], d02[i].x, d012[i].x, color);
         }
         
-        draw_triangle(v0, v1, v2, color);
+        draw_triangle(v0, v1, v2, d0, d1, d2, color);
     }
 
 
-    void draw_shaded_line(const glm::vec2 &point0, const glm::vec2 &point1, float h0, float h1, const sf::Color &color)
+    void draw_shaded_line(const glm::vec2 &point0, const glm::vec2 &point1, float d0, float d1, float h0, float h1, const sf::Color &color)
     {
-        int32_t x0 = static_cast<int32_t>(point0.x);
-        int32_t y0 = static_cast<int32_t>(point0.y);
-        int32_t x1 = static_cast<int32_t>(point1.x);
-        int32_t y1 = static_cast<int32_t>(point1.y);
+        float x0 = point0.x;
+        float y0 = point0.y;
+        float x1 = point1.x;
+        float y1 = point1.y;
+        
+        float delta_x = std::abs(x1 - x0);
+        float delta_y = std::abs(y1 - y0);
         bool steep = false;
-        int32_t delta_x = std::abs(x1 - x0);
-        int32_t delta_y = std::abs(y1 - y0);
         if (delta_y > delta_x)
         {
             std::swap(x0, y0);
@@ -461,65 +510,49 @@ private:
             std::swap(delta_x, delta_y);
             steep = true;
         }
+
+    
         if (x0 > x1)
         {
             std::swap(x0, x1);
             std::swap(y0, y1);
+            std::swap(d0, d1);
             std::swap(h0, h1);
         }
-        int32_t error = 0;
-        int32_t delta_error = delta_y + 1;
 
-        int32_t y = y0;
-        int32_t dir_y = y1 - y0;
-        if (dir_y > 0)
-            dir_y = 1;
-        if (dir_y < 0)
-            dir_y = -1;
+        std::vector<glm::vec2> depth = interpolate(d0, x0, d1, x1);
+        std::vector<glm::vec2> points = interpolate(y0, x0, y1, x1);
+        std::vector<glm::vec2> h = interpolate(h0, x0, h1, x1);
 
-        std::vector<glm::vec2> h = interpolate(h0, static_cast<float>(x0), h1, static_cast<float>(x1));
-        
-        int i = 0;
-        for (int32_t x = x0; x <= x1; x++)
+
+        for (int32_t i = 0; i < points.size(); i++)
         {
             sf::Color local_color;
             local_color.r = static_cast<uint8_t>(clamp(static_cast<int>(static_cast<float>(color.r) * h[i].x), 0, 255));
             local_color.g = static_cast<uint8_t>(clamp(static_cast<int>(static_cast<float>(color.g) * h[i].x), 0, 255));
             local_color.b = static_cast<uint8_t>(clamp(static_cast<int>(static_cast<float>(color.b) * h[i].x), 0, 255));
             if (steep)
-            {
-                put_pixel(y, x, local_color);
-            }
+                put_pixel(static_cast<int32_t>(points[i].x), static_cast<int32_t>(points[i].y), depth[i].x, local_color);
             else
-            {
-                put_pixel(x, y, local_color);
-            }
-
-            error += delta_error;
-            if (error >= (delta_x + 1))
-            {
-                y += dir_y;
-                error -= (delta_x + 1);
-            }
-            i++;
+                put_pixel(static_cast<int32_t>(points[i].y), static_cast<int32_t>(points[i].x), depth[i].x, local_color);
         }
     }
 
     
-    void draw_shaded_triangle(std::vector<glm::vec2> triangle, std::vector<float> brightness, const sf::Color &color)
+    void draw_shaded_triangle(std::vector<glm::vec2> triangle, std::vector<float> depth, std::vector<float> brightness, const sf::Color &color)
     {
         if (triangle.size() != 3)
         {
             throw "Wrong size of triangle";
         }
 
-        draw_shaded_line(triangle[0], triangle[1], brightness[0], brightness[1], color);
-        draw_shaded_line(triangle[0], triangle[2], brightness[0], brightness[2], color);
-        draw_shaded_line(triangle[1], triangle[2], brightness[1], brightness[2], color);
+        draw_shaded_line(triangle[0], triangle[1], depth[0], depth[1], brightness[0], brightness[1], color);
+        draw_shaded_line(triangle[0], triangle[2], depth[0], depth[2], brightness[0], brightness[2], color);
+        draw_shaded_line(triangle[1], triangle[2], depth[1], depth[2], brightness[1], brightness[2], color);
     }
 
 
-    void draw_shaded_filled_triangle(std::vector<glm::vec2> triangle, std::vector<float> brightness, const sf::Color &color)
+    void draw_shaded_filled_triangle(const std::vector<glm::vec2> &triangle, const std::vector<float> &depth, std::vector<float> brightness, const sf::Color &color)
     {
         if (triangle.size() != 3)
         {
@@ -529,6 +562,10 @@ private:
         glm::vec2 v0 = triangle[0];
         glm::vec2 v1 = triangle[1];
         glm::vec2 v2 = triangle[2];
+
+        float d0 = depth[0];
+        float d1 = depth[1];
+        float d2 = depth[2];
 
         float h0 = brightness[0];
         float h1 = brightness[1];
@@ -538,17 +575,21 @@ private:
         { 
             std::swap(v1, v0);
             std::swap(h1, h0);
+            std::swap(d1, d0);
         }
         if (v2.y < v0.y)
         {
             std::swap(v2, v0);
             std::swap(h2, h0);
+            std::swap(d2, d0);
         }
         if (v2.y < v1.y)
         {
             std::swap(v2, v1);
             std::swap(h2, h1);
+            std::swap(d2, d1);
         }
+
         
         std::vector<glm::vec2> x01 = interpolate(v0.x, v0.y, v1.x, v1.y);
         x01.pop_back();
@@ -558,6 +599,7 @@ private:
         std::vector<glm::vec2> x012 = x01;
         x012.insert(x012.end(), x12.begin(), x12.end());
 
+
         std::vector<glm::vec2> h01 = interpolate(h0, v0.y, h1, v1.y);
         h01.pop_back();
         std::vector<glm::vec2> h12 = interpolate(h1, v1.y, h2, v2.y);
@@ -565,46 +607,44 @@ private:
         
         std::vector<glm::vec2> h012 = h01;
         h012.insert(h012.end(), h12.begin(), h12.end());
+
+
+        std::vector<glm::vec2> d01 = interpolate(d0, v0.y, d1, v1.y);
+        d01.pop_back();
+        std::vector<glm::vec2> d12 = interpolate(d1, v1.y, d2, v2.y);
+        std::vector<glm::vec2> d02 = interpolate(d0, v0.y, d2, v2.y);
+        
+        std::vector<glm::vec2> d012 = d01;
+        d012.insert(d012.end(), d12.begin(), d12.end());
         
                         
         for (int32_t i = 0; i < x02.size(); i++)
         {
-            draw_shaded_line(x02[i], x012[i], h02[i].x, h012[i].x, color);
+            draw_shaded_line(x02[i], x012[i], d02[i].x, d012[i].x, h02[i].x, h012[i].x, color);
         }
 
-        draw_shaded_triangle(triangle, brightness, color);
+        draw_shaded_triangle(triangle, depth, brightness, color);
     }
 
 
     glm::vec2 viewport_to_canvas(float x, float y)
     {
-        return glm::vec2(x * WIDTH / viewport_width, y * HEIGHT / viewport_height);
+        return glm::vec2(x * WIDTH / static_cast<float>(viewport_width), y * HEIGHT / static_cast<float>(viewport_height));
     }
 
 
-    glm::vec2 project_vertex(const glm::vec3 &vertex)
+    glm::vec2 project_vertex(const glm::vec4 &vertex)
     {
         return viewport_to_canvas(vertex.x * d / vertex.z, vertex.y * d / vertex.z);
     }
 
 
-    void render_object(const std::vector<glm::vec3> &vertices, const std::vector<std::pair<std::vector<int32_t>, sf::Color>> &triangles)
+    void render_triangle(const std::pair<std::vector<int32_t>, sf::Color> &triangle, const std::vector<std::pair<glm::vec2, float>> &projected)
     {
-        std::vector<glm::vec2> projected;
-        for (const auto &vertex : vertices)
-        {
-            projected.push_back(project_vertex(vertex));
-        }
-        for (const auto &triangle : triangles)
-        {
-            render_triangle(triangle, projected);
-        }
-    }
-
-
-    void render_triangle(const std::pair<std::vector<int32_t>, sf::Color> &triangle, const std::vector<glm::vec2> &projected)
-    {
-        draw_triangle(projected[triangle.first[0]], projected[triangle.first[1]], projected[triangle.first[2]], triangle.second);
+        std::pair<glm::vec2, float> vert0 = projected[triangle.first[0]];
+        std::pair<glm::vec2, float> vert1 = projected[triangle.first[1]];
+        std::pair<glm::vec2, float> vert2 = projected[triangle.first[2]];
+        draw_filled_triangle({vert0.first, vert1.first, vert2.first}, {vert0.second, vert1.second, vert2.second}, triangle.second);
     }
 
 
@@ -612,8 +652,8 @@ private:
     {
         scene.models = 
         {
-            {cube, glm::vec3(1.5f), glm::vec3(0.0f, 1.0f, 0.0f), 45.0f, glm::vec3(-1.5f, 0.0f, 7.0f)},
-            {cube, glm::vec3(1.0f), glm::vec3(1.0f), 0.0f, glm::vec3(1.25f, 2.0f, 7.5f)}
+            {cube, glm::vec3(1.0f), glm::vec3(0.0f, 1.0f, 0.0f), 45.0f, glm::vec3(-1.5f, 0.0f, 7.0f)},
+            {cube, glm::vec3(1.0f), glm::vec3(1.0f), 0.0f, glm::vec3(1.25f, 2.5f, 7.5f)}
         };
     }
 
@@ -627,22 +667,14 @@ private:
     }
 
 
-    glm::vec3 apply_camera_transform(const glm::vec3 &vertex)
-    {
-        glm::vec result_vertex = vertex;
-        result_vertex = result_vertex * glm::mat3(glm::rotate(glm::radians(camera_angle), camera_rotation));
-        result_vertex -= camera_pos;
-
-        return result_vertex;
-    }
-
-
     void render_instance(const ModelInstance &instance)
     {
-        std::vector<glm::vec2> projected;
-        for (const auto &vertex : instance.get_vertices())
+        std::vector<std::pair<glm::vec2, float>> projected;
+        for (const auto &vertex : instance.vertices)
         {
-            projected.push_back(project_vertex(apply_camera_transform(vertex)));
+            glm::vec4 t_vert = camera.transform * vertex;
+            std::pair<glm::vec2, float> result(project_vertex(t_vert), 1.0f / vertex.z);
+            projected.push_back(result);
         }
         for (const auto &triangle : instance.model.triangles)
         {
